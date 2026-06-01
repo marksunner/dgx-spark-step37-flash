@@ -59,14 +59,19 @@ Step 3.7 Flash includes chain-of-thought reasoning (thinking mode). The model pr
 
 We connected the Step 3.7 Flash backend to [Hermes](https://github.com/hermes-ai/hermes), an open-source AI agent framework, running as "Steve" on Discord.
 
+**Test setup:** Step 3.7 Flash serving on one DGX Spark, Hermes agent framework running on a separate DGX Spark, connected via the OpenAI-compatible API over LAN.
+
 **Results:**
 - ✅ Chat responses — natural, coherent conversation
 - ✅ File operations — successfully wrote a 1,500-word story to disk
 - ✅ Tool calling — working out of the box (unlike DS4 Flash which had format mismatches)
 - ✅ Reasoning — deep chain-of-thought on complex prompts
-- ✅ CPU headroom — Hermes runs on CPU while model uses GPU exclusively
 
-The model runs entirely on the Blackwell GPU. CPU utilisation during inference is **0%**, leaving the full 20-core ARM CPU available for the agent framework. This is the same architecture pattern that works for Qwen 3.5 122B + Hermes on a single Spark.
+### CPU Headroom (Not Yet Tested on Same Machine)
+
+During inference, the model runs entirely on the Blackwell GPU. CPU utilisation is **0%**, leaving the full 20-core ARM CPU idle. In theory, this means the agent framework (Hermes or similar) could run on the **same** Spark alongside the model — the same pattern that works for Qwen 3.5 122B + Hermes on a single Spark.
+
+**We have not yet tested running both the model and agent on the same machine.** Our test used two separate Sparks. Based on the resource profile (GPU-only inference, idle CPU), co-location should work, but we'll update this section once verified.
 
 ## Quick Start
 
