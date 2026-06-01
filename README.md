@@ -1,0 +1,178 @@
+# Step 3.7 Flash on a Single DGX Spark ⚡
+
+Running StepFun's Step 3.7 Flash (198B MoE) on a **single NVIDIA DGX Spark** with llama.cpp — no cluster needed.
+
+## TL;DR
+
+| Metric | Result |
+|--------|--------|
+| **Model** | Step 3.7 Flash (198B params, ~11B active per token) |
+| **Quantization** | Q4_K_S GGUF (~105 GB) |
+| **Hardware** | 1× NVIDIA DGX Spark (GB10, 128 GB unified memory) |
+| **Generation speed** | **26–27.5 tok/s** |
+| **Prompt processing** | 90–107 tok/s |
+| **Context window** | 128K tokens |
+| **KV cache** | q4_0 (fits 128K context in memory) |
+| **Tool calling** | ✅ Works (file I/O, code execution verified) |
+| **Agent-ready** | ✅ Tested with Hermes agent framework |
+| **CPU idle** | 99.5% — free for agent framework |
+
+## Why This Matters
+
+We originally set out to test whether Step 3.7 Flash could run on **two** DGX Sparks using vLLM tensor parallelism (like our [DS4 Flash dual-Spark experiment](https://github.com/marksunner/dgx-spark-vllm-tp-benchmark)). The FP8 model crashed during loading, the dual-Spark approach was complex and fragile.
+
+Then we discovered the GGUF path: **a single Spark, running llama.cpp, outperforms the dual-Spark vLLM setup by 2.2×.**
+
+| Setup | Speed | Hardware | Complexity |
+|-------|-------|----------|------------|
+| DS4 Flash, vLLM TP=2 | 12.4 tok/s | 2× DGX Spark + QSFP cluster | High |
+| **Step 3.7 Flash, llama.cpp** | **27 tok/s** | **1× DGX Spark** | **Low** |
+
+For anyone considering buying a second DGX Spark for dual-node inference: **try this first**. You might not need it.
+
+## Benchmarks
+
+### Generation Speed
+
+All tests at 128K context, Q4_K_S quantization, q4_0 KV cache.
+
+| Test | Tokens | Speed | Total Time |
+|------|--------|-------|------------|
+| Short answer (math) | 57 | 27.5 tok/s | 2.3s |
+| Identity check | 133 | 27.2 tok/s | 4.9s |
+| Code generation | 2,000 | 26.2 tok/s | 76.6s |
+| Long generation (essay) | 3,439 | 26.0 tok/s | 132.4s |
+
+Speed is remarkably consistent across generation lengths — no degradation even at 3,400+ tokens.
+
+### Prompt Processing
+
+| Prompt Size | Speed |
+|-------------|-------|
+| Short (24–33 tokens) | 90–107 tok/s |
+
+### Built-in Reasoning
+
+Step 3.7 Flash includes chain-of-thought reasoning (thinking mode). The model produces internal reasoning tokens before its visible response. This adds latency but improves quality — especially for complex tasks, code generation, and agentic tool use.
+
+## Agent Test: Hermes + Steve
+
+We connected the Step 3.7 Flash backend to [Hermes](https://github.com/hermes-ai/hermes), an open-source AI agent framework, running as "Steve" on Discord.
+
+**Results:**
+- ✅ Chat responses — natural, coherent conversation
+- ✅ File operations — successfully wrote a 1,500-word story to disk
+- ✅ Tool calling — working out of the box (unlike DS4 Flash which had format mismatches)
+- ✅ Reasoning — deep chain-of-thought on complex prompts
+- ✅ CPU headroom — Hermes runs on CPU while model uses GPU exclusively
+
+The model runs entirely on the Blackwell GPU. CPU utilisation during inference is **0%**, leaving the full 20-core ARM CPU available for the agent framework. This is the same architecture pattern that works for Qwen 3.5 122B + Hermes on a single Spark.
+
+## Quick Start
+
+### Prerequisites
+
+- NVIDIA DGX Spark (128 GB unified memory)
+- Docker with NVIDIA Container Toolkit
+- Docker Compose v2
+- ~110 GB free disk space
+- HuggingFace account (optional, for faster downloads)
+
+### Setup
+
+```bash
+# Clone the Docker template
+git clone https://github.com/stevibe/step37-flash-dgx-spark.git
+cd step37-flash-dgx-spark
+
+# (Optional) Add HuggingFace token for faster downloads
+echo "HF_TOKEN=hf_your_token_here" > .env
+
+# For 128K context (recommended for agent use)
+cat >> .env << 'EOF'
+MAX_MODEL_LEN=131072
+CACHE_TYPE_K=q4_0
+CACHE_TYPE_V=q4_0
+EOF
+
+# Build and start (first run downloads ~105 GB model)
+docker compose up -d --build
+```
+
+The first startup:
+1. Builds llama.cpp from StepFun's fork with Step 3.7 support (~10 min)
+2. Downloads Q4_K_S GGUF shards from HuggingFace (~105 GB)
+3. Loads model to GPU and starts serving
+
+### Verify
+
+```bash
+# Check health
+curl http://localhost:8000/v1/models
+
+# Test generation
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "step37-flash-q4-k-s",
+    "messages": [{"role": "user", "content": "Hello! What model are you?"}],
+    "temperature": 0.2,
+    "max_tokens": 500
+  }'
+```
+
+### Context Window Options
+
+| Context | KV Cache | Memory Fit | Use Case |
+|---------|----------|------------|----------|
+| 32K | q8_0 | Comfortable | Chat, short tasks |
+| 128K | q4_0 | Good fit | Agent use, long documents |
+| 256K | q4_0 | Tight | Maximum context (may need tuning) |
+
+## Architecture Notes
+
+### Why Q4_K_S?
+
+Step 3.7 Flash is a 198B parameter Mixture-of-Experts model, but only ~11B parameters activate per token. The Q4_K_S quantization reduces the total model size from ~400 GB (FP16) to ~105 GB, fitting comfortably in the DGX Spark's 128 GB unified memory with room for KV cache.
+
+Despite the aggressive quantization, quality remains excellent — the sparse MoE architecture means the active parameters per token are relatively well-preserved.
+
+### Why llama.cpp over vLLM?
+
+We tested both:
+
+- **vLLM (FP8, TP=2, dual-Spark)**: Model loading crashed during worker initialization. Step 3.7 support in vLLM is bleeding-edge (custom patch, days old). Even when the infrastructure works, TP=2 over RDMA adds complexity and limits throughput.
+- **llama.cpp (Q4_K_S, single Spark)**: StepFun maintains their own llama.cpp fork with native Step 3.7 support. Battle-tested engine, simple Docker setup, OpenAI-compatible API out of the box.
+
+For this model on DGX Spark, llama.cpp wins on every dimension: speed, simplicity, reliability, and single-node operation.
+
+### GPU vs CPU Split
+
+During inference on DGX Spark:
+- **GPU (Blackwell GB10)**: Model weights, attention, MoE routing — 100% of inference
+- **CPU (20-core ARM Grace)**: Idle during inference — available for agent frameworks, monitoring, or other services
+
+This makes the DGX Spark ideal for running a complete AI agent stack (model + framework) on a single machine.
+
+## Comparison with Other Models on DGX Spark
+
+| Model | Quant | Speed | Context | Sparks | Notes |
+|-------|-------|-------|---------|--------|-------|
+| Qwen 3.5 122B | INT4+FP8 hybrid | 42–47 tok/s | 16–131K | 1 | Fastest single-Spark option |
+| **Step 3.7 Flash** | **Q4_K_S** | **27 tok/s** | **128K** | **1** | **Best agentic benchmarks** |
+| DeepSeek V4 Flash | FP4+FP8 | 12.4 tok/s | 65K | 2 | Dual-Spark, clean but slow |
+| Qwen 3.5 397B | NVFP4 | ~10 tok/s | 16K | 4 | Technically impressive, impractical |
+
+## Credits
+
+- **[StepFun AI](https://stepfun.com/)** — Step 3.7 Flash model and llama.cpp fork
+- **[stevibe](https://github.com/stevibe/step37-flash-dgx-spark)** — Docker Compose template for DGX Spark
+- **[eugr](https://github.com/eugr/spark-vllm-docker)** — vLLM Docker recipes (used for the FP8 attempt)
+- **Nic (albond)** — whose question started this whole journey, and whose Qwen 122B hybrid recipe transformed our fleet
+- **NVIDIA DGX Spark community** — for collectively figuring out what these machines can do
+
+## License
+
+This write-up and benchmark data are released under [MIT License](LICENSE).
+
+The Step 3.7 Flash model is licensed under [Apache 2.0](https://huggingface.co/stepfun-ai/Step-3.7-Flash-FP8/blob/main/LICENSE) by StepFun AI.
