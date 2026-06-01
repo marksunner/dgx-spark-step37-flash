@@ -1,6 +1,6 @@
-# Step 3.7 Flash on a Single DGX Spark ⚡
+# Step 3.7 Flash on a Single DGX Spark
 
-Running StepFun's Step 3.7 Flash (198B MoE) on a **single NVIDIA DGX Spark** with llama.cpp — no cluster needed.
+Notes from running StepFun's Step 3.7 Flash (198B MoE) on a single NVIDIA DGX Spark with llama.cpp.
 
 ## TL;DR
 
@@ -13,22 +13,22 @@ Running StepFun's Step 3.7 Flash (198B MoE) on a **single NVIDIA DGX Spark** wit
 | **Prompt processing** | 90–107 tok/s |
 | **Context window** | 128K tokens |
 | **KV cache** | q4_0 (fits 128K context in memory) |
-| **Tool calling** | ✅ Works (file I/O, code execution verified) |
-| **Agent-ready** | ✅ Tested with Hermes agent framework |
-| **CPU idle** | 99.5% — free for agent framework |
+| **Tool calling** | Works (file I/O verified via Hermes agent) |
+| **Agent use** | Tested with Hermes on a separate Spark |
+| **CPU during inference** | ~0% (model runs on GPU only) |
 
-## Why This Matters
+## Background
 
-We originally set out to test whether Step 3.7 Flash could run on **two** DGX Sparks using vLLM tensor parallelism (like our [DS4 Flash dual-Spark experiment](https://github.com/marksunner/dgx-spark-vllm-tp-benchmark)). The FP8 model crashed during loading, the dual-Spark approach was complex and fragile.
+We originally set out to test whether Step 3.7 Flash could run on two DGX Sparks using vLLM tensor parallelism (similar to our [DS4 Flash dual-Spark experiment](https://github.com/marksunner/dgx-spark-vllm-tp-benchmark)). The FP8 model crashed during worker initialization — Step 3.7 support in vLLM is very new and the dual-Spark approach proved fragile.
 
-Then we discovered the GGUF path: **a single Spark, running llama.cpp, outperforms the dual-Spark vLLM setup by 2.2×.**
+We then tried the GGUF path with llama.cpp on a single Spark. For comparison:
 
 | Setup | Speed | Hardware | Complexity |
 |-------|-------|----------|------------|
 | DS4 Flash, vLLM TP=2 | 12.4 tok/s | 2× DGX Spark + QSFP cluster | High |
-| **Step 3.7 Flash, llama.cpp** | **27 tok/s** | **1× DGX Spark** | **Low** |
+| Step 3.7 Flash, llama.cpp | 27 tok/s | 1× DGX Spark | Low |
 
-For anyone considering buying a second DGX Spark for dual-node inference: **try this first**. You might not need it.
+The single-Spark approach turned out to be both faster and simpler. Worth considering before investing in multi-node infrastructure.
 
 ## Benchmarks
 
@@ -43,7 +43,7 @@ All tests at 128K context, Q4_K_S quantization, q4_0 KV cache.
 | Code generation | 2,000 | 26.2 tok/s | 76.6s |
 | Long generation (essay) | 3,439 | 26.0 tok/s | 132.4s |
 
-Speed is remarkably consistent across generation lengths — no degradation even at 3,400+ tokens.
+Speed was consistent across generation lengths in our tests.
 
 ### Prompt Processing
 
@@ -140,7 +140,7 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 Step 3.7 Flash is a 198B parameter Mixture-of-Experts model, but only ~11B parameters activate per token. The Q4_K_S quantization reduces the total model size from ~400 GB (FP16) to ~105 GB, fitting comfortably in the DGX Spark's 128 GB unified memory with room for KV cache.
 
-Despite the aggressive quantization, quality remains excellent — the sparse MoE architecture means the active parameters per token are relatively well-preserved.
+The sparse MoE architecture means only a fraction of total parameters are active per token, which may help preserve quality under quantization. Our subjective impression was that output quality was good, but we haven't run formal quality benchmarks.
 
 ### Why llama.cpp over vLLM?
 
@@ -149,7 +149,7 @@ We tested both:
 - **vLLM (FP8, TP=2, dual-Spark)**: Model loading crashed during worker initialization. Step 3.7 support in vLLM is bleeding-edge (custom patch, days old). Even when the infrastructure works, TP=2 over RDMA adds complexity and limits throughput.
 - **llama.cpp (Q4_K_S, single Spark)**: StepFun maintains their own llama.cpp fork with native Step 3.7 support. Battle-tested engine, simple Docker setup, OpenAI-compatible API out of the box.
 
-For this model on DGX Spark, llama.cpp wins on every dimension: speed, simplicity, reliability, and single-node operation.
+In our testing, the llama.cpp path was more straightforward and produced better results for this particular model on DGX Spark.
 
 ### GPU vs CPU Split
 
@@ -157,24 +157,24 @@ During inference on DGX Spark:
 - **GPU (Blackwell GB10)**: Model weights, attention, MoE routing — 100% of inference
 - **CPU (20-core ARM Grace)**: Idle during inference — available for agent frameworks, monitoring, or other services
 
-This makes the DGX Spark ideal for running a complete AI agent stack (model + framework) on a single machine.
+This suggests the DGX Spark could potentially run a complete AI agent stack (model + framework) on a single machine, though we haven't verified this yet (see agent test section above).
 
 ## Comparison with Other Models on DGX Spark
 
 | Model | Quant | Speed | Context | Sparks | Notes |
 |-------|-------|-------|---------|--------|-------|
-| Qwen 3.5 122B | INT4+FP8 hybrid | 42–47 tok/s | 16–131K | 1 | Fastest single-Spark option |
-| **Step 3.7 Flash** | **Q4_K_S** | **27 tok/s** | **128K** | **1** | **Best agentic benchmarks** |
-| DeepSeek V4 Flash | FP4+FP8 | 12.4 tok/s | 65K | 2 | Dual-Spark, clean but slow |
-| Qwen 3.5 397B | NVFP4 | ~10 tok/s | 16K | 4 | Technically impressive, impractical |
+| Qwen 3.5 122B | INT4+FP8 hybrid | 42–47 tok/s | 16–131K | 1 | Faster raw throughput |
+| Step 3.7 Flash | Q4_K_S | 27 tok/s | 128K | 1 | Larger model, strong agentic scores |
+| DeepSeek V4 Flash | FP4+FP8 | 12.4 tok/s | 65K | 2 | Requires dual-Spark cluster |
+| Qwen 3.5 397B | NVFP4 | ~10 tok/s | 16K | 4 | Requires quad-Spark cluster |
 
 ## Credits
 
 - **[StepFun AI](https://stepfun.com/)** — Step 3.7 Flash model and llama.cpp fork
 - **[stevibe](https://github.com/stevibe/step37-flash-dgx-spark)** — Docker Compose template for DGX Spark
 - **[eugr](https://github.com/eugr/spark-vllm-docker)** — vLLM Docker recipes (used for the FP8 attempt)
-- **Nic (albond)** — whose question started this whole journey, and whose Qwen 122B hybrid recipe transformed our fleet
-- **NVIDIA DGX Spark community** — for collectively figuring out what these machines can do
+- **Nic (albond)** — whose question prompted this investigation, and whose Qwen 122B hybrid recipe has been invaluable
+- **NVIDIA DGX Spark community** — for the shared knowledge that makes this possible
 
 ## License
 
