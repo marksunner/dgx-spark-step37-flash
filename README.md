@@ -159,6 +159,30 @@ During inference on DGX Spark:
 
 This suggests the DGX Spark could potentially run a complete AI agent stack (model + framework) on a single machine, though we haven't verified this yet (see agent test section above).
 
+## Atlas NVFP4 — Work in Progress
+
+We are working on native NVFP4 support for Step 3.7 Flash through the [Atlas inference engine](https://github.com/Avarok-Cybersecurity/atlas), which uses custom Blackwell (SM121) CUDA kernels rather than generic quantization.
+
+**Status:** Config parsing, kernel compilation, and GPU initialization all verified. Weight loading is blocked by a fused expert tensor format issue. See [PR #119](https://github.com/Avarok-Cybersecurity/atlas/pull/119) for details.
+
+| Component | Status |
+|-----------|--------|
+| Config parser | ✅ Step 3.7 nested format fully parsed |
+| CUDA kernels | ✅ 90 custom kernels compiled for GB10 |
+| GPU initialization | ✅ All PTX modules loaded |
+| EP topology | ✅ Local expert ranges calculated |
+| Weight loading | ⚠️ Blocked — fused expert tensors need CPU-side slicing |
+
+**Why this matters:** Atlas delivers 2–3× faster inference than vLLM on the same hardware for supported models. If the weight loading is resolved, Step 3.7 on Atlas could potentially exceed the 27 tok/s achieved by the llama.cpp approach above.
+
+**Architecture overlap with existing Atlas models:**
+- Sigmoid MoE routing → MiniMax M2 kernels (same head_dim=128, same partial RoPE 0.5)
+- Shared experts → Qwen 3.5 infrastructure
+- Mixed full/sliding attention → Gemma-4 pattern
+- 3 MTP modules → MiniMax M2 MTP structure
+
+The fused expert tensor format (all 288 experts packed into single tensors per projection) is the remaining engineering challenge — it requires EP-aware loading that can slice the fused blob before GPU upload.
+
 ## Comparison with Other Models on DGX Spark
 
 | Model | Quant | Speed | Context | Sparks | Notes |
@@ -174,6 +198,7 @@ This suggests the DGX Spark could potentially run a complete AI agent stack (mod
 - **[stevibe](https://github.com/stevibe/step37-flash-dgx-spark)** — Docker Compose template for DGX Spark
 - **[eugr](https://github.com/eugr/spark-vllm-docker)** — vLLM Docker recipes (used for the FP8 attempt)
 - **Nic (albond)** — whose question prompted this investigation, and whose Qwen 122B hybrid recipe has been invaluable
+- **[Atlas Inference Engine](https://github.com/Avarok-Cybersecurity/atlas)** — Pure Rust inference with custom Blackwell kernels (NVFP4 work in progress)
 - **NVIDIA DGX Spark community** — for the shared knowledge that makes this possible
 
 ## License
