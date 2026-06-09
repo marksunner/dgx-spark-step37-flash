@@ -249,7 +249,7 @@ The fused expert tensor format (all 288 experts packed into single tensors per p
 | Model | Quant | Speed | Context | Sparks | Notes |
 |-------|-------|-------|---------|--------|-------|
 | Qwen 3.5 122B | INT4+FP8 hybrid | 42–47 tok/s | 16–131K | 1 | Faster raw throughput |
-| Step 3.7 Flash | Q4_K_S | 27 tok/s | 128K | 1 | Larger model, strong agentic scores |
+| Step 3.7 Flash | Q4_K_S | 27 tok/s | 96K | 1 | Larger model, strong agentic scores (see [Stability](#stability-cuda-graph-crash--context-ceiling)) |
 | DeepSeek V4 Flash | FP4+FP8 | 12.4 tok/s | 65K | 2 | Requires dual-Spark cluster |
 | Qwen 3.5 397B | NVFP4 | ~10 tok/s | 16K | 4 | Requires quad-Spark cluster |
 
