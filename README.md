@@ -249,7 +249,7 @@ This suggests the DGX Spark could potentially run a complete AI agent stack (mod
 
 We are working on native NVFP4 support for Step 3.7 Flash through the [Atlas inference engine](https://github.com/Avarok-Cybersecurity/atlas), which uses custom Blackwell (SM121) CUDA kernels rather than generic quantization.
 
-**Status:** Config parsing, kernel compilation, and GPU initialization all verified. Weight loading is blocked by a fused expert tensor format issue. See [PR #119](https://github.com/Avarok-Cybersecurity/atlas/pull/119) for details.
+**Status:** Config parsing, kernel compilation, and GPU initialization all verified. Weight loading is blocked by a fused expert tensor format issue. See [PR #136](https://github.com/Avarok-Cybersecurity/atlas/pull/136) for details.
 
 | Component | Status |
 |-----------|--------|
