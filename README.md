@@ -90,6 +90,31 @@ If you're running large GGUF models on DGX Spark with context windows above 96K 
 
 This is a Blackwell + llama.cpp interaction issue, not specific to Step 3.7. Any large model pushing unified memory utilisation high on GB10 hardware could hit it.
 
+### Why q8_0 KV Cache at 96K — Not q4_0 at 112K
+
+*This section is subjective — it reflects our reasoning for a specific use case. Your priorities may differ.*
+
+After settling on 96K context, we faced a follow-up question: should we use q8_0 KV cache (higher fidelity, more memory per token) or q4_0 (lower fidelity, but room to increase context back toward 112K)?
+
+The maths:
+
+| Config | Context | KV Cache | Memory per token | Total KV memory | Tokens before compaction |
+|--------|---------|----------|-----------------|-----------------|-------------------------|
+| **Our choice** | 96K | q8_0 | ~1 byte | ~10–11 GB | 96K |
+| Alternative | 112K | q4_0 | ~0.5 byte | ~6–7 GB | 112K |
+
+The alternative actually uses *less* total memory and gives 16K more tokens of conversation headroom. For research-heavy tasks with many tool calls, that extra headroom reduces context compaction (where the agent framework summarises earlier conversation to free space, losing detail in the process).
+
+We chose q8_0 anyway. Here's why:
+
+**Step 3.7 Flash's value is reasoning, not throughput.** This model is slower than alternatives like Qwen 3.5 122B (~28 tok/s vs ~47 tok/s). Its advantage is chain-of-thought reasoning — the ability to think through a problem step by step, catch inconsistencies, and handle tasks that require careful judgement. That reasoning quality depends on the fidelity of the context it's working from. q8_0 preserves more nuance in the KV cache representations, which matters most for exactly the kind of careful, methodical work where Step 3.7 excels.
+
+**The use case that tipped the decision:** In a scenario where faster models (Qwen 3.5 122B or similar) are available for bulk research and triage, Step 3.7's unique role becomes precision work — config debugging, careful analysis, verifying claims, or acting as a break-glass backup when cloud APIs are unavailable. These tasks are inherently short-context: read a config file, reason about what's wrong, suggest a fix. They don't need 112K tokens. They need the tokens they do use to be represented as accurately as possible.
+
+**The trade-off in practice:** On heavy research tasks (24+ web searches, large reports), the 96K limit causes context compaction. We observed 2–5 compaction events on sustained workloads, which does degrade output quality. If your primary use case is long research tasks, q4_0 at 112K may be the better choice. If your primary use case is careful reasoning on focused problems, q8_0 at 96K preserves the quality that makes Step 3.7 worth running in the first place.
+
+**A collaborative alternative:** In our testing ([detailed in the umbrella repo](https://github.com/marksunner/dgx-spark#model-bake-off-research-task-quality)), pairing a fast model (Qwen 3.5 122B) as a scout with Step 3.7 as a verifier produced better results than either model alone. In this pipeline pattern, Step 3.7 never needs to do the context-heavy research phase — it reads a draft and verifies it. The 96K/q8_0 configuration is well-suited to this analyst role.
+
 ## Benchmarks
 
 ### Generation Speed
