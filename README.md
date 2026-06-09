@@ -11,8 +11,8 @@ Notes from running StepFun's Step 3.7 Flash (198B MoE) on a single NVIDIA DGX Sp
 | **Hardware** | 1× NVIDIA DGX Spark (GB10, 128 GB unified memory) |
 | **Generation speed** | **26–27.5 tok/s** |
 | **Prompt processing** | 90–107 tok/s |
-| **Context window** | 128K tokens |
-| **KV cache** | q4_0 (fits 128K context in memory) |
+| **Context window** | 96K tokens (reduced from 128K — see [Stability](#stability-cuda-graph-crash--context-ceiling)) |
+| **KV cache** | q8_0 (upgraded from q4_0 for better long-context quality) |
 | **Tool calling** | Works (file I/O verified via Hermes agent) |
 | **Agent use** | Tested with Hermes on a separate Spark |
 | **CPU during inference** | ~0% (model runs on GPU only) |
@@ -30,11 +30,71 @@ We then tried the GGUF path with llama.cpp on a single Spark. For comparison:
 
 The single-Spark approach turned out to be both faster and simpler. Worth considering before investing in multi-node infrastructure.
 
+## Stability: CUDA Graph Crash & Context Ceiling
+
+**Update (June 9, 2026):** After sustained agent use, we hit a crash that taught us something important about running large models on the GB10's unified memory.
+
+### What Happened
+
+During a multi-step research task (web searches → accumulate results → synthesise), the llama.cpp server crashed with:
+
+```
+ggml_cuda_compute_forward: MUL_MAT failed
+CUDA error: operation not permitted
+```
+
+At the time of the crash, the server had 3 cached prompts totalling ~110K of the 131K token limit (~6 GB of KV cache), plus the model weights (~105 GB), all competing for the same 128 GB unified memory pool.
+
+### Root Cause
+
+This is a **known class of bug on Blackwell GPUs** — [ggml-org/llama.cpp#21682](https://github.com/ggml-org/llama.cpp/issues/21682) documents CUDA graph capture failures with the error `operation not permitted when stream is capturing`. The issue affects CUB routines during CUDA graph execution and has been reproduced on other Blackwell hardware (RTX PRO 6000). It's a llama.cpp CUDA backend issue, not model-specific.
+
+The crash was triggered by high memory pressure: unified memory means the GPU compute buffers, KV cache, model weights, and OS/agent processes all share the same 128 GB physical RAM. When the KV cache grew close to the configured ceiling while the agent framework was simultaneously doing web fetches and tool calls, the CUDA graph execution hit a memory access conflict.
+
+### The Fix
+
+We had two options:
+
+| Option | Trade-off |
+|--------|-----------|
+| `GGML_CUDA_DISABLE_GRAPHS=1` | Eliminates the crash class entirely, but costs ~5-10% generation speed |
+| **Reduce context ceiling** | Zero speed impact, but limits maximum single-turn context |
+
+We chose to **reduce context from 131K to 96K** (98,304 tokens). Rationale:
+
+1. **No performance hit.** Generation speed stays at ~27 tok/s. On a model that's already compute-bound, every percentage point matters.
+2. **Addresses the actual trigger.** The crash happened because memory pressure peaked with the KV cache near capacity. A 27% reduction gives meaningful headroom for GPU compute buffers.
+3. **96K is still large.** That's ~70,000 words in a single turn. For agent use (tool calls, search results, file operations), this is more than sufficient.
+4. **Hermes + Honcho provides memory beyond the context window.** The agent framework persists conversation history in PostgreSQL — when the KV cache fills, older context is evicted but not lost.
+
+We also upgraded KV cache from q4_0 to q8_0 for better long-context quality, since the reduced context ceiling freed enough memory headroom to afford the higher-quality cache format.
+
+### Post-Fix Stress Testing
+
+After the fix, we ran two sustained workloads:
+
+| Test | Searches | Duration | Iterations | Result |
+|------|----------|----------|------------|--------|
+| WWDC research task | ~8 | ~15 min | ~6 | ✅ No crash |
+| DGX Spark landscape report (6-area research) | 24 | 27 min | 11 | ✅ No crash, 366-line report with 74 sources |
+
+Both tasks involved sustained multi-step tool use with large context accumulation — the same pattern that triggered the original crash. The 96K ceiling held.
+
+### Recommendation for Others
+
+If you're running large GGUF models on DGX Spark with context windows above 96K and experiencing intermittent CUDA crashes:
+
+1. **First try:** Reduce context to 96K. It's free (no speed hit) and addresses memory pressure.
+2. **If crashes persist:** Set `GGML_CUDA_DISABLE_GRAPHS=1` to disable CUDA graphs. This eliminates the entire class of graph-capture bugs at the cost of ~5-10% generation speed.
+3. **Monitor KV cache usage.** The crash correlates with high cache occupancy (>80% of configured limit) during concurrent tool/API activity.
+
+This is a Blackwell + llama.cpp interaction issue, not specific to Step 3.7. Any large model pushing unified memory utilisation high on GB10 hardware could hit it.
+
 ## Benchmarks
 
 ### Generation Speed
 
-All tests at 128K context, Q4_K_S quantization, q4_0 KV cache.
+All tests at Q4_K_S quantization. Original benchmarks at 128K context with q4_0 KV cache; current recommended config is 96K context with q8_0 KV cache (see [Stability](#stability-cuda-graph-crash--context-ceiling)).
 
 | Test | Tokens | Speed | Total Time |
 |------|--------|-------|------------|
@@ -93,11 +153,11 @@ cd step37-flash-dgx-spark
 # (Optional) Add HuggingFace token for faster downloads
 echo "HF_TOKEN=hf_your_token_here" > .env
 
-# For 128K context (recommended for agent use)
+# For 96K context (recommended for agent use — see Stability section)
 cat >> .env << 'EOF'
-MAX_MODEL_LEN=131072
-CACHE_TYPE_K=q4_0
-CACHE_TYPE_V=q4_0
+MAX_MODEL_LEN=98304
+CACHE_TYPE_K=q8_0
+CACHE_TYPE_V=q8_0
 EOF
 
 # Build and start (first run downloads ~105 GB model)
@@ -128,11 +188,12 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 ### Context Window Options
 
-| Context | KV Cache | Memory Fit | Use Case |
-|---------|----------|------------|----------|
-| 32K | q8_0 | Comfortable | Chat, short tasks |
-| 128K | q4_0 | Good fit | Agent use, long documents |
-| 256K | q4_0 | Tight | Maximum context (may need tuning) |
+| Context | KV Cache | Memory Fit | Stability | Use Case |
+|---------|----------|------------|-----------|----------|
+| 32K | q8_0 | Comfortable | Solid | Chat, short tasks |
+| 96K | q8_0 | Good fit | **Recommended** | Agent use, long documents |
+| 128K | q4_0 | Tight | ⚠️ CUDA crash risk under sustained load | Maximum context (see [Stability](#stability-cuda-graph-crash--context-ceiling)) |
+| 256K | q4_0 | Very tight | ⚠️ Not recommended | Untested at scale |
 
 ## Architecture Notes
 
