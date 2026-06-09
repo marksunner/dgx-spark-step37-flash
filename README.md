@@ -244,6 +244,12 @@ We are working on native NVFP4 support for Step 3.7 Flash through the [Atlas inf
 
 The fused expert tensor format (all 288 experts packed into single tensors per projection) is the remaining engineering challenge — it requires EP-aware loading that can slice the fused blob before GPU upload.
 
+## Model Bake-Off
+
+We ran a head-to-head comparison: same research task, same agent framework, Step 3.7 Flash vs Qwen 3.5 122B on separate single Sparks. Step 3.7 went deeper (more sources, better contradiction analysis); Qwen was ~6.7× faster.
+
+Full results and methodology: **[Model Bake-Off in the umbrella repo](https://github.com/marksunner/dgx-spark#model-bake-off-research-task-quality)**
+
 ## Comparison with Other Models on DGX Spark
 
 | Model | Quant | Speed | Context | Sparks | Notes |
